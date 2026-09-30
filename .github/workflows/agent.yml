@@ -1,0 +1,147 @@
+name: Jira Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticket_key:
+        description: Jira issue key (e.g. HW-12)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  id-token: write
+
+concurrency:
+  group: agent-${{ inputs.ticket_key }}
+  cancel-in-progress: false
+
+env:
+  TICKET_KEY: ${{ inputs.ticket_key }}
+  JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+  JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+  JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+  GH_TOKEN: ${{ github.token }}
+  DEFAULT_BRANCH: master
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate ticket key
+        run: |
+          [[ "$TICKET_KEY" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]] || { echo "Invalid ticket key"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch ticket and mark it in progress
+        run: |
+          mkdir -p .agent
+          bash .github/agent/jira.sh fetch "$TICKET_KEY" .agent/ticket.md
+          jq -e '.fields.labels | (index("Ready") or index("agent-in-progress"))' .agent/ticket.md.json > /dev/null \
+            || { echo "Ticket is not labelled Ready or agent-in-progress; refusing to run."; exit 1; }
+          bash .github/agent/jira.sh labels "$TICKET_KEY" agent-in-progress Ready
+          bash .github/agent/jira.sh transition "$TICKET_KEY" "In Progress"
+          bash .github/agent/jira.sh comment "$TICKET_KEY" "Claude agent started: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - name: Create work branch
+        run: |
+          branch="claude/${TICKET_KEY}"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null 2>&1; then
+            branch="${branch}-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "BRANCH=$branch" >> "$GITHUB_ENV"
+          git config user.name "claude-agent[bot]"
+          git config user.email "claude-agent@users.noreply.github.com"
+          git checkout -b "$branch"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Assemble task prompt
+        run: |
+          {
+            cat .github/agent/prompt.md
+            printf '\n\n--- BEGIN UNTRUSTED TICKET CONTENT (also in .agent/ticket.md) ---\n'
+            cat .agent/ticket.md
+            printf '\n--- END UNTRUSTED TICKET CONTENT ---\n'
+          } > .agent/task.md
+
+      - name: Run Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: "Read .agent/task.md and complete the task described there, following every rule in it."
+          claude_args: >-
+            --max-turns 40
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(dotnet:*),Bash(flutter:*),Bash(dart:*),Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*),Bash(cat:*),Bash(mkdir:*)"
+
+      - name: Classify outcome
+        id: outcome
+        run: |
+          summary=".agent/summary.md"
+          ahead="$(git rev-list --count "origin/${DEFAULT_BRANCH}..HEAD")"
+          if [[ -f "$summary" ]] && head -n1 "$summary" | grep -q '^NEEDS_INFO'; then
+            questions="$(tail -n +2 "$summary")"
+            bash .github/agent/jira.sh comment "$TICKET_KEY" "Claude needs more information before it can implement this ticket: ${questions}"
+            bash .github/agent/jira.sh labels "$TICKET_KEY" agent-needs-info agent-in-progress
+            echo "result=needs_info" >> "$GITHUB_OUTPUT"
+          elif [[ "$ahead" -eq 0 ]]; then
+            bash .github/agent/jira.sh comment "$TICKET_KEY" "Claude finished without making any commits. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            bash .github/agent/jira.sh labels "$TICKET_KEY" agent-failed agent-in-progress
+            echo "result=no_changes" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=changes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Guard protected paths
+        if: steps.outcome.outputs.result == 'changes'
+        run: |
+          if git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" | grep -E '^(\.github/|CLAUDE\.md$)'; then
+            echo "Agent modified protected files; refusing to push." >&2
+            exit 1
+          fi
+
+      - name: Push branch and open PR
+        if: steps.outcome.outputs.result == 'changes'
+        run: |
+          git push -u origin "$BRANCH"
+          title="[${TICKET_KEY}] $(sed -n 's/^Summary: //p' .agent/ticket.md | head -n1)"
+          {
+            echo "Jira: ${JIRA_BASE_URL%/}/browse/${TICKET_KEY}"
+            echo
+            cat .agent/summary.md 2>/dev/null || echo "_No summary produced by the agent._"
+            echo
+            echo "---"
+            echo "Generated by the Claude Jira agent: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > .agent/pr_body.md
+          pr_url="$(gh pr create --base "$DEFAULT_BRANCH" --head "$BRANCH" --title "$title" --body-file .agent/pr_body.md)"
+          echo "PR_URL=$pr_url" >> "$GITHUB_ENV"
+          # PRs opened with GITHUB_TOKEN do not trigger pull_request workflows.
+          # Dispatch CI on the branch so the required checks report on the head commit.
+          gh workflow run ci.yml --ref "$BRANCH"
+
+      - name: Update Jira with PR link
+        if: steps.outcome.outputs.result == 'changes'
+        run: |
+          bash .github/agent/jira.sh comment "$TICKET_KEY" "Pull request ready for review: ${PR_URL}"
+          bash .github/agent/jira.sh labels "$TICKET_KEY" agent-pr-open agent-in-progress
+          bash .github/agent/jira.sh transition "$TICKET_KEY" "In Review"
+
+      - name: Report failure to Jira
+        if: failure()
+        run: |
+          bash .github/agent/jira.sh comment "$TICKET_KEY" "Claude agent run failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" || true
+          bash .github/agent/jira.sh labels "$TICKET_KEY" agent-failed agent-in-progress || true

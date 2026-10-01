@@ -18,6 +18,17 @@ public class ApiEndpointTests(WebApplicationFactory<Program> factory)
     }
 
     [Fact]
+    public async Task Version_ReturnsVersionJson()
+    {
+        var response = await _client.GetAsync("/version");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("0.1.0", doc.RootElement.GetProperty("version").GetString());
+    }
+
+    [Fact]
     public async Task Greet_ReturnsMessage_ForValidName()
     {
         var response = await _client.GetAsync("/greet/Ada");

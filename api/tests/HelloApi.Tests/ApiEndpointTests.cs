@@ -50,6 +50,32 @@ public class ApiEndpointTests(WebApplicationFactory<Program> factory)
     }
 
     [Fact]
+    public async Task Time_ReturnsInjectedUtcTimestamp()
+    {
+        var fixedTime = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        using var faked = factory.WithWebHostBuilder(b => b.ConfigureServices(
+            services => services.AddSingleton<TimeProvider>(new FixedTimeProvider(fixedTime))));
+        var response = await faked.CreateClient().GetAsync("/time");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("2026-01-02T03:04:05.0000000Z", doc.RootElement.GetProperty("utc").GetString());
+    }
+
+    [Fact]
+    public async Task Time_ConvertsNonUtcProviderTimeToUtc()
+    {
+        var fixedTime = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.FromHours(2));
+        using var faked = factory.WithWebHostBuilder(b => b.ConfigureServices(
+            services => services.AddSingleton<TimeProvider>(new FixedTimeProvider(fixedTime))));
+        var response = await faked.CreateClient().GetAsync("/time");
+
+        using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("2026-01-02T01:04:05.0000000Z", doc.RootElement.GetProperty("utc").GetString());
+    }
+
+    [Fact]
     public async Task Greet_ReturnsMessage_ForValidName()
     {
         var response = await _client.GetAsync("/greet/Ada");
@@ -86,6 +112,11 @@ public class ApiEndpointTests(WebApplicationFactory<Program> factory)
         Assert.DoesNotContain("secret internal detail", body);
         Assert.DoesNotContain("ThrowingVersionService", body);
         Assert.DoesNotContain("   at ", body);
+    }
+
+    private class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     private class ThrowingVersionService : VersionService

@@ -2,10 +2,12 @@ using HelloApi;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<GreetingService>();
+builder.Services.AddSingleton<VersionService>();
 var app = builder.Build();
 
 app.MapGet("/", () => "Hello World!");
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/version", (VersionService versions) => Results.Ok(new { version = versions.GetVersion() }));
 app.MapGet("/greet/{name}", (string name, GreetingService greetings) =>
     greetings.TryGreet(name, out var message)
         ? Results.Ok(new { message })

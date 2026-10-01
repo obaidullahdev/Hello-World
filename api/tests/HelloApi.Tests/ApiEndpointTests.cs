@@ -1,5 +1,6 @@
 using System.Net;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace HelloApi.Tests;
 
@@ -35,5 +36,40 @@ public class ApiEndpointTests(WebApplicationFactory<Program> factory)
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Contains("Hello, Ada!", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("%20")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public async Task Greet_ReturnsProblemDetails400_ForInvalidName(string name)
+    {
+        var response = await _client.GetAsync($"/greet/{name}");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.False(string.IsNullOrEmpty(doc.RootElement.GetProperty("title").GetString()));
+        Assert.False(string.IsNullOrEmpty(doc.RootElement.GetProperty("detail").GetString()));
+        Assert.Equal(400, doc.RootElement.GetProperty("status").GetInt32());
+    }
+
+    [Fact]
+    public async Task UnhandledException_ReturnsProblemDetails500_WithoutInternals()
+    {
+        using var throwing = factory.WithWebHostBuilder(b => b.ConfigureServices(
+            services => services.AddSingleton<VersionService, ThrowingVersionService>()));
+        var response = await throwing.CreateClient().GetAsync("/version");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        using var doc = System.Text.Json.JsonDocument.Parse(body);
+        Assert.Equal(500, doc.RootElement.GetProperty("status").GetInt32());
+        Assert.DoesNotContain("secret internal detail", body);
+        Assert.DoesNotContain("ThrowingVersionService", body);
+        Assert.DoesNotContain("   at ", body);
+    }
+
+    private class ThrowingVersionService : VersionService
+    {
+        public override string GetVersion() => throw new InvalidOperationException("secret internal detail");
     }
 }

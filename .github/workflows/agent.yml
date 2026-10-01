@@ -83,6 +83,8 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
+          # The poller dispatches this workflow as github-actions[bot]; the action rejects bot actors by default.
+          allowed_bots: "github-actions"
           prompt: "Read .agent/task.md and complete the task described there, following every rule in it."
           claude_args: >-
             --max-turns 40

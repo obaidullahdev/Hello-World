@@ -1,0 +1,62 @@
+name: Jira Poller
+
+# Looks for Jira tickets labelled "Ready" and starts the agent for each one.
+# Scheduled runs always use the default branch's copy of this file.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: jira-poller
+  cancel-in-progress: false
+
+env:
+  JIRA_PROJECT: SCRUM
+  MAX_PARALLEL: "2"
+  JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+  JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+  JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find Ready tickets and start the agent
+        run: |
+          # Cost control: never run more than MAX_PARALLEL agent jobs at once.
+          active="$(gh run list --workflow agent.yml --json status --jq '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "pending")] | length')"
+          slots=$(( MAX_PARALLEL - active ))
+          if (( slots <= 0 )); then
+            echo "Agent already at capacity (${active}/${MAX_PARALLEL}); nothing to do."
+            exit 0
+          fi
+
+          jql="project = ${JIRA_PROJECT} AND labels = Ready AND statusCategory != Done ORDER BY created ASC"
+          keys="$(bash .github/agent/jira.sh search "$jql" "$slots")"
+          if [[ -z "$keys" ]]; then
+            echo "No Ready tickets."
+            exit 0
+          fi
+
+          for key in $keys; do
+            if [[ ! "$key" =~ ^[A-Z][A-Z0-9]+-[0-9]+$ ]]; then
+              echo "Skipping unexpected key: $key"
+              continue
+            fi
+            echo "Dispatching agent for $key"
+            # Claim the ticket first so the next poll cannot pick it up again.
+            bash .github/agent/jira.sh labels "$key" agent-in-progress Ready
+            if ! gh workflow run agent.yml -f ticket_key="$key"; then
+              echo "Dispatch failed for $key; releasing the claim." >&2
+              bash .github/agent/jira.sh labels "$key" Ready agent-in-progress || true
+            fi
+          done

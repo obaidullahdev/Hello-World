@@ -70,6 +70,13 @@ case "$cmd" in
     fi
     api POST "/issue/${key}/transitions" "$(jq -n --arg id "$id" '{transition:{id:$id}}')" > /dev/null
     ;;
+  search)
+    # Prints matching issue keys, one per line. Usage: jira.sh search <jql> [max-results]
+    jql="$1"
+    max="${2:-10}"
+    query="$(jq -rn --arg q "$jql" '$q | @uri')"
+    api GET "/search/jql?jql=${query}&fields=key&maxResults=${max}" | jq -r '.issues[].key'
+    ;;
   *)
     echo "unknown command: $cmd" >&2
     exit 2

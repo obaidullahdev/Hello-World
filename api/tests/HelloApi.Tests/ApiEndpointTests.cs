@@ -18,6 +18,26 @@ public class ApiEndpointTests(WebApplicationFactory<Program> factory)
     }
 
     [Fact]
+    public async Task Ping_ReturnsPongJson()
+    {
+        var response = await _client.GetAsync("/ping");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(System.Text.Json.JsonValueKind.True, doc.RootElement.GetProperty("pong").ValueKind);
+    }
+
+    [Fact]
+    public async Task Root_ReturnsHelloWorld()
+    {
+        var response = await _client.GetAsync("/");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("Hello World!", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Version_ReturnsVersionJson()
     {
         var response = await _client.GetAsync("/version");
